@@ -1,93 +1,162 @@
 import cv2
 import os
 import shutil
-from dreamer import DeepDreamer # Import the class we created
+import numpy as np
+import torch
+import torchvision.transforms.functional as F
+from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
+from dreamer import DeepDreamer
 
 INPUT_VIDEO = "input.mp4"
 OUTPUT_VIDEO = "output.mp4"
 TEMP_DIR = "temp"
 
 def process_video():
-    input_frames_dir = os.path.join(TEMP_DIR, "input")
-    output_frames_dir = os.path.join(TEMP_DIR, "output")
+    cwd = os.getcwd()
+    abs_temp_dir = os.path.join(cwd, TEMP_DIR)
+    
+    input_frames_dir = os.path.join(abs_temp_dir, "input")
+    output_frames_dir = os.path.join(abs_temp_dir, "output")
+    flow_frames_dir = os.path.join(abs_temp_dir, "flow")
 
+    print(f"Creating temporary directories at: {abs_temp_dir}")
     os.makedirs(input_frames_dir, exist_ok=True)
     os.makedirs(output_frames_dir, exist_ok=True)
+    os.makedirs(flow_frames_dir, exist_ok=True)
 
-    try:        
-        dreamer_args = [
-            "-gpu", "mps",
-            "-save_iter", "0",
-            "-print_iter", "0",
-            "-num_iterations", "10",
-        ]
+    # ---- Device Setup ----
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("Using MPS acceleration.")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+        print("Using CUDA acceleration.")
+    else:
+        device = torch.device("cpu")
+        print("Using CPU.")
+
+    print("Loading RAFT model...")
+    weights = Raft_Large_Weights.DEFAULT
+    raft_model = raft_large(weights=weights, progress=False).to(device)
+    raft_model = raft_model.eval()
+    raft_transforms = weights.transforms()
+    print("RAFT model loaded.")
+
+    dreamer_args = [
+        "-gpu", "mps",
+        "-save_iter", "0",
+        "-print_iter", "0",
+        "-num_iterations", "1",
+    ]
+    dreamer = DeepDreamer(dreamer_args)
+    print("Dreamer model loaded.")
+
+    if not os.path.exists(INPUT_VIDEO):
+        raise FileNotFoundError(f"Input video not found at: {os.path.join(cwd, INPUT_VIDEO)}")
+
+    cap = cv2.VideoCapture(INPUT_VIDEO)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video: {INPUT_VIDEO}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    print(f"Video: {total_frames} frames, {fps} FPS, {width}x{height}")
+
+    frame_count = 0
+    prev_frame_tensor = None
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            if frame_count == 0:
+                print("Error: Video opened but no frames could be read.")
+            break
+
+        print(f"Processing frame {frame_count}/{total_frames}")
+
+        input_frame_path = os.path.join(input_frames_dir, f"frame_{frame_count:06d}.jpg")
+        output_frame_path = os.path.join(output_frames_dir, f"frame_{frame_count:06d}.jpg")
+        flow_path = os.path.join(flow_frames_dir, f"flow_{frame_count:06d}.jpg")
+
+        success = cv2.imwrite(input_frame_path, frame)
+        if not success:
+            raise IOError(f"Failed to write input frame to {input_frame_path}")
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        curr_frame_tensor = torch.from_numpy(frame_rgb).permute(2, 0, 1)
+
+        if prev_frame_tensor is not None:
+            img1_batch, img2_batch = raft_transforms(
+                prev_frame_tensor.unsqueeze(0), 
+                curr_frame_tensor.unsqueeze(0)
+            )
+            
+            img1_batch = img1_batch.to(device)
+            img2_batch = img2_batch.to(device)
+
+            with torch.no_grad():
+                list_of_flows = raft_model(img1_batch, img2_batch)
+                predicted_flow = list_of_flows[-1][0]
+
+            flow = predicted_flow.permute(1, 2, 0).cpu().numpy()
+
+            hsv = np.zeros((height, width, 3), dtype=np.uint8)
+            hsv[..., 1] = 255
+            mag, ang = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+            hsv[..., 0] = ang * 180 / np.pi / 2
+            hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+            flow_vis = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+            success = cv2.imwrite(flow_path, flow_vis)
+            if not success:
+                 print(f"Warning: Failed to write flow frame {flow_path}")
+        else:
+            cv2.imwrite(flow_path, np.zeros_like(frame))
+
+        prev_frame_tensor = curr_frame_tensor
+
+        dreamer.dream(input_frame_path, output_frame_path)
         
-        dreamer = DeepDreamer(dreamer_args)
-        print("Model loaded successfully.")
+        if not os.path.exists(output_frame_path):
+             print(f"Warning: Dreamer did not produce output at {output_frame_path}")
 
-        cap = cv2.VideoCapture(INPUT_VIDEO)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video: {INPUT_VIDEO}")
+        frame_count += 1
+        if frame_count > 100: 
+            print("Frame limit reached for testing.")
+            break
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    print(f"Processed {frame_count} frames.")
 
-        print(f"Video: {total_frames} frames, {fps} FPS, {width}x{height}")
+    print("Reassembling video...")
+    fourcc = cv2.VideoWriter_fourcc(*"avc1")
+    out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, fps, (width, height))
 
-        frame_count = 0
+    frames_written = 0
+    for i in range(frame_count):
+        output_frame = os.path.join(output_frames_dir, f"frame_{i:06d}.jpg")
         
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            input_frame_path = os.path.join(input_frames_dir, f"frame_{frame_count:06d}.jpg")
-            output_frame_path = os.path.join(output_frames_dir, f"frame_{frame_count:06d}.jpg")
+        if not os.path.exists(output_frame):
+            print(f"Warning: Missing frame {output_frame}")
+            continue
             
-            cv2.imwrite(input_frame_path, frame)
+        frame = cv2.imread(output_frame)
+        if frame is None:
+            print(f"Warning: Could not read frame {output_frame}")
+            continue
 
-            print(f"Processing frame {frame_count}/{total_frames}")
+        if frame.shape[:2] != (height, width):
+            frame = cv2.resize(frame, (width, height))
 
-            dreamer.dream(input_frame_path, output_frame_path)
-            
-            frame_count += 1
+        out.write(frame)
+        frames_written += 1
 
-            if frame_count > 100:  # Limit for testing
-                print("\nFrame limit reached for testing.")
-                break
-
-        cap.release()
-        print(f"\nProcessed {frame_count} frames.")
-
-        print("Reassembling video...")
-        fourcc = cv2.VideoWriter_fourcc(*"avc1")
-        out = cv2.VideoWriter(OUTPUT_VIDEO, fourcc, fps, (width, height))
-
-        for i in range(frame_count):
-            output_frame = os.path.join(output_frames_dir, f"frame_{i:06d}.jpg")
-            if not os.path.exists(output_frame):
-                output_frame = os.path.join(output_frames_dir, f"frame_{i:06d}.png")
-            
-            frame = cv2.imread(output_frame)
-            if frame is None:
-                print(f"Warning: Frame {i} missing/corrupt.")
-                continue
-                
-            if frame.shape[1] != width or frame.shape[0] != height:
-                frame = cv2.resize(frame, (width, height))
-                
-            out.write(frame)
-
-        out.release()
-        print(f"Video saved to {OUTPUT_VIDEO}")
-
-    finally:
-        print("Cleaning up...")
-        if os.path.exists(TEMP_DIR):
-            shutil.rmtree(TEMP_DIR)
-        print("Done!")
+    out.release()
+    print(f"Video saved to {OUTPUT_VIDEO} with {frames_written} frames.")
+    print(f"Temp files are located at: {abs_temp_dir}")
 
 if __name__ == "__main__":
     process_video()
