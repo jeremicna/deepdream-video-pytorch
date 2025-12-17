@@ -217,7 +217,7 @@ class DeepDreamer:
 
         for iter in range(1, self.params.num_iterations+1):
             for octave, octave_sizes in enumerate(octave_list, 1):
-                net = copy.deepcopy(self.net_base) if not self.has_inception else self.net_base
+                net = self.net_base
                 dream_losses, tv_losses, l2_losses = [], [], []
                 
                 if not self.has_inception:
