@@ -12,7 +12,32 @@ OUTPUT_VIDEO = "output.mp4"
 TEMP_DIR = "temp"
 
 # 0.0 = Pure Warp (blurry), 1.0 = No Warp (flickering).
-BLEND_WEIGHT = 0.2
+BLEND_WEIGHT = 0.3
+UPDATE_INTERVAL = 5
+
+def update_output_video(output_path, frames_dir, width, height, fps, count):
+    temp_output = output_path + ".tmp.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
+    
+    frames_written = 0
+    for i in range(count):
+        frame_path = os.path.join(frames_dir, f"frame_{i:06d}.jpg")
+        if os.path.exists(frame_path):
+            frame_read = cv2.imread(frame_path)
+            if frame_read is not None:
+                if frame_read.shape[:2] != (height, width):
+                    frame_read = cv2.resize(frame_read, (width, height))
+                out.write(frame_read)
+                frames_written += 1
+    
+    out.release()
+    
+    if os.path.exists(output_path):
+        os.remove(output_path)
+    os.rename(temp_output, output_path)
+    
+    print(f"[Video Update] Refreshed {output_path} with {frames_written} frames.")
 
 def process_video():
     cwd = os.getcwd()
@@ -125,59 +150,29 @@ def process_video():
 
             if os.path.exists(output_frame_path):
                 prev_dream = cv2.imread(output_frame_path)
-
-                if prev_dream is None:
-                    print(
-                        f"Warning: Could not read dream output "
-                        f"{output_frame_path}"
-                    )
-                else:
+                if prev_dream is not None:
                     if prev_dream.shape[:2] != (height, width):
-                        prev_dream = cv2.resize(
-                            prev_dream,
-                            (width, height),
-                            interpolation=cv2.INTER_LINEAR
-                        )
-
+                        prev_dream = cv2.resize(prev_dream, (width, height))
                         cv2.imwrite(output_frame_path, prev_dream)
             else:
-                print(
-                    f"Warning: Dreamer did not produce output at "
-                    f"{output_frame_path}"
-                )
+                print(f"Warning: Output missing at {output_frame_path}")
 
             frame_count += 1
 
+            if frame_count % UPDATE_INTERVAL == 0:
+                update_output_video(
+                    OUTPUT_VIDEO, 
+                    output_frames_dir, 
+                    width, 
+                    height, 
+                    fps, 
+                    frame_count
+                )
+
         cap.release()
-        print(f"Processed {frame_count} frames.")
-
-        print("Reassembling video...")
-        fourcc = cv2.VideoWriter_fourcc(*"avc1")
-        out = cv2.VideoWriter(
-            OUTPUT_VIDEO, fourcc, fps, (width, height)
-        )
-
-        frames_written = 0
-        for i in range(frame_count):
-            output_frame = os.path.join(
-                output_frames_dir, f"frame_{i:06d}.jpg"
-            )
-
-            if os.path.exists(output_frame):
-                frame_read = cv2.imread(output_frame)
-                if frame_read is not None:
-                    if frame_read.shape[:2] != (height, width):
-                        frame_read = cv2.resize(
-                            frame_read, (width, height)
-                        )
-                    out.write(frame_read)
-                    frames_written += 1
-
-        out.release()
-        print(
-            f"Video saved to {OUTPUT_VIDEO} "
-            f"with {frames_written} frames."
-        )
+        
+        print("Finalizing video...")
+        update_output_video(OUTPUT_VIDEO, output_frames_dir, width, height, fps, frame_count)
 
     finally:
         if os.path.exists(abs_temp_dir):
