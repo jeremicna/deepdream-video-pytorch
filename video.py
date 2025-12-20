@@ -12,7 +12,7 @@ OUTPUT_VIDEO = "output.mp4"
 TEMP_DIR = "temp"
 
 # 0.0 = Pure Warp (blurry), 1.0 = No Warp (flickering).
-BLEND_WEIGHT = 0.3
+BLEND_WEIGHT = 0.5
 UPDATE_INTERVAL = 5
 
 def update_output_video(output_path, frames_dir, width, height, fps, count):
@@ -57,11 +57,12 @@ def process_video():
         
         dreamer_args = [
             "-gpu", "mps",
-            "-lap_scale", "4",
+            "-lap_scale", "4", # Maybe 4?
+            "-channel_mode", "strong",
             "-image_size", "1024",
             "-save_iter", "0",
             "-print_iter", "0",
-            "-num_iterations", "5",
+            "-num_iterations", "2",
         ]
 
         if not os.path.exists(INPUT_VIDEO):
