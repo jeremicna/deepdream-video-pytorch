@@ -3,7 +3,6 @@ import os
 import shutil
 import numpy as np
 import torch
-import gc
 import argparse
 import sys
 import contextlib
@@ -91,6 +90,9 @@ def process_video(args, dreamer_args):
 
         print(f"Video: {total_frames} frames, {fps} FPS, {width}x{height}")
 
+        output_width = None
+        output_height = None
+
         frame_count = 0
         prev_frame = None
         prev_dream = None
@@ -159,7 +161,7 @@ def process_video(args, dreamer_args):
                 dreamer.dream(input_frame_path, output_frame_path)
 
             del dreamer
-            gc.collect()
+
             if torch.backends.mps.is_available():
                 torch.mps.empty_cache()
             if torch.cuda.is_available():
@@ -168,28 +170,32 @@ def process_video(args, dreamer_args):
             if os.path.exists(output_frame_path):
                 prev_dream = cv2.imread(output_frame_path)
                 if prev_dream is not None:
-                    if prev_dream.shape[:2] != (height, width):
-                        prev_dream = cv2.resize(prev_dream, (width, height))
-                        cv2.imwrite(output_frame_path, prev_dream)
+                    if output_width is None or output_height is None:
+                        output_height, output_width = prev_dream.shape[:2]
+                        print(f"DeepDream output size detected: {output_width}x{output_height}")
+                    
             else:
                 print(f"Warning: Output missing at {output_frame_path}")
 
             frame_count += 1
 
-            if frame_count % args.update_interval == 0:
+            if frame_count % args.update_interval == 0 and output_width is not None:
                 update_output_video(
                     args.output_video, 
                     output_frames_dir, 
-                    width, 
-                    height, 
+                    output_width, 
+                    output_height, 
                     fps, 
                     frame_count
                 )
 
         cap.release()
         
-        print("Finalizing video...")
-        update_output_video(args.output_video, output_frames_dir, width, height, fps, frame_count)
+        if output_width is not None:
+            print("Finalizing video...")
+            update_output_video(args.output_video, output_frames_dir, output_width, output_height, fps, frame_count)
+        else:
+            print("Error: No frames were successfully processed")
 
     finally:
         if os.path.exists(abs_temp_dir) and not args.keep_temp:
