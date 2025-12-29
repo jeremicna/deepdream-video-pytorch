@@ -8,8 +8,8 @@ import contextlib
 from dreamer import DeepDreamer
 import optical_flow as flow_est
 
-def get_suppressor(debug_mode):
-    if debug_mode:
+def get_suppressor(show_output):
+    if show_output:
         return contextlib.nullcontext()
     return contextlib.redirect_stdout(open(os.devnull, 'w'))
 
@@ -76,7 +76,8 @@ def update_output_video(output_path, frames_dir, width, height, fps, count):
 def process_video(args, dreamer_args):
     cwd = os.getcwd()
     abs_temp_dir = os.path.join(cwd, args.temp_dir)
-    suppressor = get_suppressor(args.debug)
+    
+    output_suppressor = get_suppressor(args.verbose)
 
     keys_to_remove = ["-content_image", "-output_image"]
     clean_dreamer_args = filter_args(dreamer_args, keys_to_remove)
@@ -93,9 +94,12 @@ def process_video(args, dreamer_args):
         os.makedirs(flow_frames_dir, exist_ok=True)
         os.makedirs(mask_frames_dir, exist_ok=True)
 
-        print("Initializing Optical Flow (RAFT)...")
-        with suppressor:
-            raft_model, raft_transforms, device = flow_est.init_raft()
+        if not args.independent:
+            print("Initializing Optical Flow (RAFT)...")
+            with output_suppressor:
+                raft_model, raft_transforms, device = flow_est.init_raft()
+        else:
+            print("Mode: Independent (Temporal consistency disabled)")
         
         if not os.path.exists(args.content_video):
             raise FileNotFoundError(f"Input video not found at: {args.content_video}")
@@ -124,7 +128,7 @@ def process_video(args, dreamer_args):
 
             print(f"Processing frame {frame_count}/{total_frames}")
 
-            with suppressor:
+            with output_suppressor:
                 dreamer = DeepDreamer(clean_dreamer_args)
 
             input_frame_path = os.path.join(input_frames_dir, f"frame_{frame_count:06d}.jpg")
@@ -134,37 +138,38 @@ def process_video(args, dreamer_args):
 
             img_to_dream = frame.copy()
 
-            if prev_frame is not None:
-                with suppressor:
-                    flow_data, flow_vis = flow_est.estimate_flow(
-                        prev_frame, frame, raft_model, raft_transforms, device
-                    )
-                cv2.imwrite(flow_path, flow_vis)
+            if not args.independent:
+                if prev_frame is not None:
+                    with output_suppressor:
+                        flow_data, flow_vis = flow_est.estimate_flow(
+                            prev_frame, frame, raft_model, raft_transforms, device
+                        )
+                    cv2.imwrite(flow_path, flow_vis)
 
-                if prev_dream is not None:
-                    if prev_dream.shape[:2] != frame.shape[:2]:
-                        prev_dream = cv2.resize(prev_dream, (frame.shape[1], frame.shape[0]))
+                    if prev_dream is not None:
+                        if prev_dream.shape[:2] != frame.shape[:2]:
+                            prev_dream = cv2.resize(prev_dream, (frame.shape[1], frame.shape[0]))
 
-                    warped_prev_dream = flow_est.warp_image(prev_dream, flow_data)
-                    warped_prev_frame = flow_est.warp_image(prev_frame, flow_data)
+                        warped_prev_dream = flow_est.warp_image(prev_dream, flow_data)
+                        warped_prev_frame = flow_est.warp_image(prev_frame, flow_data)
 
-                    mask, mask_vis = calculate_occlusion_mask(frame, warped_prev_frame, threshold=30)
-                    cv2.imwrite(mask_path, mask_vis)
+                        mask, mask_vis = calculate_occlusion_mask(frame, warped_prev_frame, threshold=30)
+                        cv2.imwrite(mask_path, mask_vis)
 
-                    guided_dream = (mask * warped_prev_dream) + ((1 - mask) * frame)
-                    guided_dream = guided_dream.astype(np.uint8)
+                        guided_dream = (mask * warped_prev_dream) + ((1 - mask) * frame)
+                        guided_dream = guided_dream.astype(np.uint8)
 
-                    img_to_dream = cv2.addWeighted(
-                        frame, args.blend, guided_dream, (1 - args.blend), 0
-                    )
-            else:
-                cv2.imwrite(flow_path, np.zeros_like(frame))
-                cv2.imwrite(mask_path, 255 * np.ones((height, width), dtype=np.uint8))
+                        img_to_dream = cv2.addWeighted(
+                            frame, args.blend, guided_dream, (1 - args.blend), 0
+                        )
+                else:
+                    cv2.imwrite(flow_path, np.zeros_like(frame))
+                    cv2.imwrite(mask_path, 255 * np.ones((height, width), dtype=np.uint8))
 
             prev_frame = frame.copy()
             cv2.imwrite(input_frame_path, img_to_dream)
 
-            with suppressor:
+            with output_suppressor:
                 dreamer.dream(input_frame_path, output_frame_path)
             
             del dreamer
@@ -199,7 +204,10 @@ if __name__ == "__main__":
     parser.add_argument("-temp_dir", type=str, default="temp", help="Directory for temporary frames")
     parser.add_argument("-blend", type=float, default=0.5, help="Blend weight")
     parser.add_argument("-update_interval", type=int, default=5, help="Update output video every N frames")
-    parser.add_argument("-debug", action="store_true", help="Enable stdout")
+    
+    parser.add_argument("-verbose", action="store_true", help="Enable detailed logs")
+    parser.add_argument("-independent", action="store_true", help="Disable temporal consistency")
+    
     parser.add_argument("-keep_temp", action="store_true", help="Do not delete temp directory")
 
     args, unknown_args = parser.parse_known_args()
