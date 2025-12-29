@@ -27,14 +27,28 @@ def filter_args(args_list, keys_to_remove):
     return filtered
 
 def calculate_occlusion_mask(current_frame, warped_prev_frame, threshold=30):
+    height, width = current_frame.shape[:2]
+    
+    base_size = int(np.sqrt(height * width))
+    
+    morph_size = max(3, int(base_size * 0.003))
+    morph_size = morph_size if morph_size % 2 == 1 else morph_size + 1
+    
+    blur_size = max(5, int(base_size * 0.009))
+    blur_size = blur_size if blur_size % 2 == 1 else blur_size + 1
+    
     diff = cv2.absdiff(current_frame, warped_prev_frame)
     gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+    
     _, mask = cv2.threshold(gray_diff, threshold, 255, cv2.THRESH_BINARY_INV)
-    kernel = np.ones((3, 3), np.uint8)
+    
+    kernel = np.ones((morph_size, morph_size), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.GaussianBlur(mask, (9, 9), 0)
+    
+    mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
     
     float_mask = mask.astype(np.float32) / 255.0
+    
     return np.expand_dims(float_mask, axis=2), mask
 
 def update_output_video(output_path, frames_dir, width, height, fps, count):
@@ -71,13 +85,13 @@ def process_video(args, dreamer_args):
         input_frames_dir = os.path.join(abs_temp_dir, "input")
         output_frames_dir = os.path.join(abs_temp_dir, "output")
         flow_frames_dir = os.path.join(abs_temp_dir, "flow")
-        mask_frames_dir = os.path.join(abs_temp_dir, "mask")  # NEW DIR
+        mask_frames_dir = os.path.join(abs_temp_dir, "mask")
 
         print(f"Creating temporary directories at: {abs_temp_dir}")
         os.makedirs(input_frames_dir, exist_ok=True)
         os.makedirs(output_frames_dir, exist_ok=True)
         os.makedirs(flow_frames_dir, exist_ok=True)
-        os.makedirs(mask_frames_dir, exist_ok=True) # Create mask folder
+        os.makedirs(mask_frames_dir, exist_ok=True)
 
         print("Initializing Optical Flow (RAFT)...")
         with suppressor:
@@ -116,7 +130,7 @@ def process_video(args, dreamer_args):
             input_frame_path = os.path.join(input_frames_dir, f"frame_{frame_count:06d}.jpg")
             output_frame_path = os.path.join(output_frames_dir, f"frame_{frame_count:06d}.jpg")
             flow_path = os.path.join(flow_frames_dir, f"flow_{frame_count:06d}.jpg")
-            mask_path = os.path.join(mask_frames_dir, f"mask_{frame_count:06d}.jpg") # Path for mask
+            mask_path = os.path.join(mask_frames_dir, f"mask_{frame_count:06d}.jpg")
 
             img_to_dream = frame.copy()
 
@@ -134,10 +148,8 @@ def process_video(args, dreamer_args):
                     warped_prev_dream = flow_est.warp_image(prev_dream, flow_data)
                     warped_prev_frame = flow_est.warp_image(prev_frame, flow_data)
 
-                    # Get both Float mask (for math) and Visual mask (for saving)
                     mask, mask_vis = calculate_occlusion_mask(frame, warped_prev_frame, threshold=30)
                     
-                    # SAVE THE MASK
                     cv2.imwrite(mask_path, mask_vis)
 
                     decayed_dream = cv2.addWeighted(warped_prev_dream, args.decay, frame, (1 - args.decay), 0)
