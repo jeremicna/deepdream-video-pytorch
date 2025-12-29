@@ -149,11 +149,9 @@ def process_video(args, dreamer_args):
                     warped_prev_frame = flow_est.warp_image(prev_frame, flow_data)
 
                     mask, mask_vis = calculate_occlusion_mask(frame, warped_prev_frame, threshold=30)
-                    
                     cv2.imwrite(mask_path, mask_vis)
 
-                    decayed_dream = cv2.addWeighted(warped_prev_dream, args.decay, frame, (1 - args.decay), 0)
-                    guided_dream = (mask * decayed_dream) + ((1 - mask) * frame)
+                    guided_dream = (mask * warped_prev_dream) + ((1 - mask) * frame)
                     guided_dream = guided_dream.astype(np.uint8)
 
                     img_to_dream = cv2.addWeighted(
@@ -200,7 +198,6 @@ if __name__ == "__main__":
     parser.add_argument("-output_video", type=str, default="output.mp4", help="Path to output video")
     parser.add_argument("-temp_dir", type=str, default="temp", help="Directory for temporary frames")
     parser.add_argument("-blend", type=float, default=0.5, help="Blend weight")
-    parser.add_argument("-decay", type=float, default=0.95, help="Dream preservation factor")
     parser.add_argument("-update_interval", type=int, default=5, help="Update output video every N frames")
     parser.add_argument("-debug", action="store_true", help="Enable stdout")
     parser.add_argument("-keep_temp", action="store_true", help="Do not delete temp directory")
