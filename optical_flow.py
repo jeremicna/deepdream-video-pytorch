@@ -65,3 +65,28 @@ def estimate_flow(prev_frame_bgr, curr_frame_bgr, model, transforms, device):
     flow_vis = flow_to_image(flow_np)
 
     return flow_np, flow_vis
+
+def calculate_occlusion_mask(current_frame, warped_prev_frame, threshold=30):
+    height, width = current_frame.shape[:2]
+    
+    base_size = int(np.sqrt(height * width))
+    
+    morph_size = max(3, int(base_size * 0.003))
+    morph_size = morph_size if morph_size % 2 == 1 else morph_size + 1
+    
+    blur_size = max(5, int(base_size * 0.009))
+    blur_size = blur_size if blur_size % 2 == 1 else blur_size + 1
+    
+    diff = cv2.absdiff(current_frame, warped_prev_frame)
+    gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+    
+    _, mask = cv2.threshold(gray_diff, threshold, 255, cv2.THRESH_BINARY_INV)
+    
+    kernel = np.ones((morph_size, morph_size), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    
+    mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
+    
+    float_mask = mask.astype(np.float32) / 255.0
+    
+    return np.expand_dims(float_mask, axis=2), mask

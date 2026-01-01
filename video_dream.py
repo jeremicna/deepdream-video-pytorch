@@ -26,31 +26,6 @@ def filter_args(args_list, keys_to_remove):
         filtered.append(arg)
     return filtered
 
-def calculate_occlusion_mask(current_frame, warped_prev_frame, threshold=30):
-    height, width = current_frame.shape[:2]
-    
-    base_size = int(np.sqrt(height * width))
-    
-    morph_size = max(3, int(base_size * 0.003))
-    morph_size = morph_size if morph_size % 2 == 1 else morph_size + 1
-    
-    blur_size = max(5, int(base_size * 0.009))
-    blur_size = blur_size if blur_size % 2 == 1 else blur_size + 1
-    
-    diff = cv2.absdiff(current_frame, warped_prev_frame)
-    gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
-    
-    _, mask = cv2.threshold(gray_diff, threshold, 255, cv2.THRESH_BINARY_INV)
-    
-    kernel = np.ones((morph_size, morph_size), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    
-    mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
-    
-    float_mask = mask.astype(np.float32) / 255.0
-    
-    return np.expand_dims(float_mask, axis=2), mask
-
 def update_output_video(output_path, frames_dir, width, height, fps, count):
     temp_output = output_path + ".tmp.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -153,7 +128,7 @@ def process_video(args, dreamer_args):
                         warped_prev_dream = flow_est.warp_image(prev_dream, flow_data)
                         warped_prev_frame = flow_est.warp_image(prev_frame, flow_data)
 
-                        mask, mask_vis = calculate_occlusion_mask(frame, warped_prev_frame, threshold=30)
+                        mask, mask_vis = flow_est.calculate_occlusion_mask(frame, warped_prev_frame, threshold=30)
                         cv2.imwrite(mask_path, mask_vis)
 
                         guided_dream = (mask * warped_prev_dream) + ((1 - mask) * frame)
