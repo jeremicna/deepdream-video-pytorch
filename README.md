@@ -18,7 +18,15 @@ https://github.com/user-attachments/assets/e7630c8c-3ed9-4b42-bba9-a666338a1784
 
 ### With frames processed independently
 
+https://github.com/user-attachments/assets/11eb095b-9c8a-4a5c-ac7b-d1e669682bb3
+
+https://github.com/user-attachments/assets/7c560487-9ab4-4f69-ace2-7221d7ff1edb
+
 ### Inputs
+
+https://github.com/user-attachments/assets/1c6bec63-078d-4817-86a4-a50716b7e4ec
+
+https://github.com/user-attachments/assets/57f80cd1-24f3-410a-b44c-61d74bae4ae1
 
 ## Setup
 
