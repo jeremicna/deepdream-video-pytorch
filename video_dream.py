@@ -4,7 +4,6 @@ import shutil
 import torch
 import argparse
 import contextlib
-import subprocess
 
 from dreamer import DeepDreamer
 import optical_flow as flow_est
@@ -81,57 +80,19 @@ def validate_video_args(args):
         raise ValueError("-update_interval must be 0 or greater")
 
 
-def encode_with_ffmpeg(output_path, frames_dir, fps, count):
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        return False, 0
+def create_video_writer(output_path, fps, width, height):
+    for codec in ("avc1", "H264", "mp4v"):
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        if writer.isOpened():
+            return writer, codec
+        writer.release()
+    raise ValueError(f"Could not create output video: {output_path}")
 
+
+def update_output_video(output_path, frames_dir, width, height, fps, count):
     temp_output = output_path + ".tmp.mp4"
-    frame_pattern = os.path.join(frames_dir, "frame_%06d.jpg")
-    cmd = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-framerate",
-        str(fps),
-        "-start_number",
-        "0",
-        "-i",
-        frame_pattern,
-        "-frames:v",
-        str(count),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "18",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        temp_output,
-    ]
-
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        if os.path.exists(temp_output):
-            os.remove(temp_output)
-        print(f"Warning: ffmpeg H.264 encode failed; falling back to OpenCV mp4v. {result.stderr.strip()}")
-        return False, 0
-
-    os.replace(temp_output, output_path)
-    return True, count
-
-
-def encode_with_opencv(output_path, frames_dir, width, height, fps, count):
-    temp_output = output_path + ".tmp.mp4"
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
-    if not out.isOpened():
-        raise ValueError(f"Could not create output video: {temp_output}")
+    out, codec = create_video_writer(temp_output, fps, width, height)
 
     frames_written = 0
     for i in range(count):
@@ -146,18 +107,11 @@ def encode_with_opencv(output_path, frames_dir, width, height, fps, count):
 
     out.release()
     os.replace(temp_output, output_path)
-    return frames_written
-
-
-def update_output_video(output_path, frames_dir, width, height, fps, count):
-    encoded_with_ffmpeg, frames_written = encode_with_ffmpeg(output_path, frames_dir, fps, count)
-    codec = "H.264" if encoded_with_ffmpeg else "mp4v"
-
-    if not encoded_with_ffmpeg:
-        frames_written = encode_with_opencv(output_path, frames_dir, width, height, fps, count)
 
     print(f"[Video Update] Refreshed {output_path} with {frames_written} frames.")
     print(f"[Video Update] Codec: {codec}")
+    if codec == "mp4v":
+        print("[Video Update] Note: mp4v is valid MP4, but VS Code's preview may not play it.")
 
 
 def load_temporal_guidance(verbose):
