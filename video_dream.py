@@ -1,17 +1,25 @@
 import cv2
 import os
 import shutil
-import numpy as np
 import torch
 import argparse
 import contextlib
+import subprocess
+
 from dreamer import DeepDreamer
 import optical_flow as flow_est
 
-def get_suppressor(show_output):
+
+@contextlib.contextmanager
+def suppress_output(show_output):
     if show_output:
-        return contextlib.nullcontext()
-    return contextlib.redirect_stdout(open(os.devnull, 'w'))
+        yield
+        return
+
+    with open(os.devnull, "w") as devnull:
+        with contextlib.redirect_stdout(devnull):
+            yield
+
 
 def filter_args(args_list, keys_to_remove):
     filtered = []
@@ -23,14 +31,108 @@ def filter_args(args_list, keys_to_remove):
         if arg in keys_to_remove:
             skip_next = True
             continue
+        if any(arg.startswith(f"{key}=") for key in keys_to_remove):
+            continue
         filtered.append(arg)
     return filtered
 
-def update_output_video(output_path, frames_dir, width, height, fps, count):
+
+def create_workspace(temp_dir):
+    root = os.path.abspath(temp_dir)
+    workspace = {
+        "root": root,
+        "input": os.path.join(root, "input"),
+        "output": os.path.join(root, "output"),
+        "flow": os.path.join(root, "flow"),
+        "mask": os.path.join(root, "mask"),
+    }
+    print(f"Creating temporary directories at: {workspace['root']}")
+    for path in (workspace["input"], workspace["output"], workspace["flow"], workspace["mask"]):
+        os.makedirs(path, exist_ok=True)
+    return workspace
+
+
+def frame_paths(workspace, frame_number):
+    return {
+        "dream_input": os.path.join(workspace["input"], f"frame_{frame_number:06d}.jpg"),
+        "dream_output": os.path.join(workspace["output"], f"frame_{frame_number:06d}.jpg"),
+        "flow": os.path.join(workspace["flow"], f"flow_{frame_number:06d}.jpg"),
+        "mask": os.path.join(workspace["mask"], f"mask_{frame_number:06d}.jpg"),
+    }
+
+
+def cleanup_workspace(workspace):
+    if os.path.exists(workspace["root"]):
+        print(f"Cleaning up: {workspace['root']}")
+        shutil.rmtree(workspace["root"])
+
+
+def clear_accelerator_cache():
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def validate_video_args(args):
+    if not 0.0 <= args.blend <= 1.0:
+        raise ValueError("-blend must be between 0.0 and 1.0")
+    if args.update_interval < 0:
+        raise ValueError("-update_interval must be 0 or greater")
+
+
+def encode_with_ffmpeg(output_path, frames_dir, fps, count):
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return False, 0
+
+    temp_output = output_path + ".tmp.mp4"
+    frame_pattern = os.path.join(frames_dir, "frame_%06d.jpg")
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-framerate",
+        str(fps),
+        "-start_number",
+        "0",
+        "-i",
+        frame_pattern,
+        "-frames:v",
+        str(count),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        temp_output,
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
+        print(f"Warning: ffmpeg H.264 encode failed; falling back to OpenCV mp4v. {result.stderr.strip()}")
+        return False, 0
+
+    os.replace(temp_output, output_path)
+    return True, count
+
+
+def encode_with_opencv(output_path, frames_dir, width, height, fps, count):
     temp_output = output_path + ".tmp.mp4"
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
-    
+    if not out.isOpened():
+        raise ValueError(f"Could not create output video: {temp_output}")
+
     frames_written = 0
     for i in range(count):
         frame_path = os.path.join(frames_dir, f"frame_{i:06d}.jpg")
@@ -41,136 +143,135 @@ def update_output_video(output_path, frames_dir, width, height, fps, count):
                     frame_read = cv2.resize(frame_read, (width, height))
                 out.write(frame_read)
                 frames_written += 1
-    
+
     out.release()
-    if os.path.exists(output_path):
-        os.remove(output_path)
-    os.rename(temp_output, output_path)
+    os.replace(temp_output, output_path)
+    return frames_written
+
+
+def update_output_video(output_path, frames_dir, width, height, fps, count):
+    encoded_with_ffmpeg, frames_written = encode_with_ffmpeg(output_path, frames_dir, fps, count)
+    codec = "H.264" if encoded_with_ffmpeg else "mp4v"
+
+    if not encoded_with_ffmpeg:
+        frames_written = encode_with_opencv(output_path, frames_dir, width, height, fps, count)
+
     print(f"[Video Update] Refreshed {output_path} with {frames_written} frames.")
+    print(f"[Video Update] Codec: {codec}")
+
+
+def load_temporal_guidance(verbose):
+    print("Initializing Optical Flow (RAFT)...")
+    with suppress_output(verbose):
+        return flow_est.TemporalGuidance.load_raft()
+
 
 def process_video(args, dreamer_args):
-    cwd = os.getcwd()
-    abs_temp_dir = os.path.join(cwd, args.temp_dir)
-    
-    output_suppressor = get_suppressor(args.verbose)
+    validate_video_args(args)
 
     keys_to_remove = ["-content_image", "-output_image"]
     clean_dreamer_args = filter_args(dreamer_args, keys_to_remove)
 
+    if not os.path.exists(args.content_video):
+        raise FileNotFoundError(f"Input video not found at: {args.content_video}")
+
+    workspace = create_workspace(args.temp_dir)
+
     try:
-        input_frames_dir = os.path.join(abs_temp_dir, "input")
-        output_frames_dir = os.path.join(abs_temp_dir, "output")
-        flow_frames_dir = os.path.join(abs_temp_dir, "flow")
-        mask_frames_dir = os.path.join(abs_temp_dir, "mask")
-
-        print(f"Creating temporary directories at: {abs_temp_dir}")
-        os.makedirs(input_frames_dir, exist_ok=True)
-        os.makedirs(output_frames_dir, exist_ok=True)
-        os.makedirs(flow_frames_dir, exist_ok=True)
-        os.makedirs(mask_frames_dir, exist_ok=True)
-
-        if not args.independent:
-            print("Initializing Optical Flow (RAFT)...")
-            with output_suppressor:
-                raft_model, raft_transforms, device = flow_est.init_raft()
-        else:
+        temporal_guidance = None
+        if args.independent:
             print("Mode: Independent (Temporal consistency disabled)")
-        
-        if not os.path.exists(args.content_video):
-            raise FileNotFoundError(f"Input video not found at: {args.content_video}")
-
-        cap = cv2.VideoCapture(args.content_video)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video: {args.content_video}")
-
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-        print(f"Video: {total_frames} frames, {fps} FPS, {width}x{height}")
+        else:
+            temporal_guidance = load_temporal_guidance(args.verbose)
 
         output_width = None
         output_height = None
         frame_count = 0
-        prev_frame = None
-        prev_dream = None
+        cap = cv2.VideoCapture(args.content_video)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video: {args.content_video}")
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-            print(f"Processing frame {frame_count}/{total_frames}")
+            print(f"Video: {total_frames} frames, {fps} FPS, {width}x{height}")
 
-            with output_suppressor:
-                dreamer = DeepDreamer(clean_dreamer_args)
+            prev_frame = None
+            prev_dream = None
 
-            input_frame_path = os.path.join(input_frames_dir, f"frame_{frame_count:06d}.jpg")
-            output_frame_path = os.path.join(output_frames_dir, f"frame_{frame_count:06d}.jpg")
-            flow_path = os.path.join(flow_frames_dir, f"flow_{frame_count:06d}.jpg")
-            mask_path = os.path.join(mask_frames_dir, f"mask_{frame_count:06d}.jpg")
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-            img_to_dream = frame.copy()
+                print(f"Processing frame {frame_count}/{total_frames}")
 
-            if not args.independent:
-                if prev_frame is not None:
-                    with output_suppressor:
-                        flow_data, flow_vis = flow_est.estimate_flow(
-                            prev_frame, frame, raft_model, raft_transforms, device
+                with suppress_output(args.verbose):
+                    dreamer = DeepDreamer(clean_dreamer_args)
+
+                paths = frame_paths(workspace, frame_count)
+                img_to_dream = frame.copy()
+
+                if temporal_guidance is not None:
+                    with suppress_output(args.verbose):
+                        img_to_dream, flow_vis, mask_vis = temporal_guidance.guide(
+                            frame, prev_frame, prev_dream, blend=args.blend
                         )
-                    cv2.imwrite(flow_path, flow_vis)
+                    cv2.imwrite(paths["flow"], flow_vis)
+                    cv2.imwrite(paths["mask"], mask_vis)
 
-                    if prev_dream is not None:
-                        if prev_dream.shape[:2] != frame.shape[:2]:
-                            prev_dream = cv2.resize(prev_dream, (frame.shape[1], frame.shape[0]))
+                prev_frame = frame.copy()
+                cv2.imwrite(paths["dream_input"], img_to_dream)
 
-                        warped_prev_dream = flow_est.warp_image(prev_dream, flow_data)
-                        warped_prev_frame = flow_est.warp_image(prev_frame, flow_data)
+                with suppress_output(args.verbose):
+                    dreamer.dream(paths["dream_input"], paths["dream_output"])
 
-                        mask, mask_vis = flow_est.calculate_occlusion_mask(frame, warped_prev_frame, threshold=30)
-                        cv2.imwrite(mask_path, mask_vis)
+                del dreamer
+                clear_accelerator_cache()
 
-                        guided_dream = (mask * warped_prev_dream) + ((1 - mask) * frame)
-                        guided_dream = guided_dream.astype(np.uint8)
-
-                        img_to_dream = cv2.addWeighted(
-                            frame, args.blend, guided_dream, (1 - args.blend), 0
-                        )
-                else:
-                    cv2.imwrite(flow_path, np.zeros_like(frame))
-                    cv2.imwrite(mask_path, 255 * np.ones((height, width), dtype=np.uint8))
-
-            prev_frame = frame.copy()
-            cv2.imwrite(input_frame_path, img_to_dream)
-
-            with output_suppressor:
-                dreamer.dream(input_frame_path, output_frame_path)
-            
-            del dreamer
-            if torch.backends.mps.is_available(): torch.mps.empty_cache()
-            if torch.cuda.is_available(): torch.cuda.empty_cache()
-
-            if os.path.exists(output_frame_path):
-                prev_dream = cv2.imread(output_frame_path)
-                if prev_dream is not None:
-                    if output_width is None:
+                if os.path.exists(paths["dream_output"]):
+                    prev_dream = cv2.imread(paths["dream_output"])
+                    if prev_dream is not None and output_width is None:
                         output_height, output_width = prev_dream.shape[:2]
-            else:
-                print(f"Warning: Output missing at {output_frame_path}")
+                    elif prev_dream is None:
+                        print(f"Warning: Could not read output frame at {paths['dream_output']}")
+                else:
+                    print(f"Warning: Output missing at {paths['dream_output']}")
 
-            frame_count += 1
-            if frame_count % args.update_interval == 0 and output_width is not None:
-                update_output_video(args.output_video, output_frames_dir, output_width, output_height, fps, frame_count)
+                frame_count += 1
+                if (
+                    args.update_interval > 0
+                    and frame_count % args.update_interval == 0
+                    and output_width is not None
+                ):
+                    update_output_video(
+                        args.output_video,
+                        workspace["output"],
+                        output_width,
+                        output_height,
+                        fps,
+                        frame_count,
+                    )
 
-        cap.release()
+        finally:
+            cap.release()
+
         if output_width is not None:
-            update_output_video(args.output_video, output_frames_dir, output_width, output_height, fps, frame_count)
+            update_output_video(
+                args.output_video,
+                workspace["output"],
+                output_width,
+                output_height,
+                fps,
+                frame_count,
+            )
 
     finally:
-        if os.path.exists(abs_temp_dir) and not args.keep_temp:
-            print(f"Cleaning up: {abs_temp_dir}")
-            shutil.rmtree(abs_temp_dir)
+        if not args.keep_temp:
+            cleanup_workspace(workspace)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Video DeepDream CLI")

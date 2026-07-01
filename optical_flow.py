@@ -1,7 +1,8 @@
-import torch
-import numpy as np
 import cv2
+import numpy as np
+import torch
 from torchvision.models.optical_flow import raft_large, Raft_Large_Weights
+
 
 def get_device():
     if torch.backends.mps.is_available():
@@ -21,6 +22,44 @@ def init_raft():
     transforms = weights.transforms()
     print("RAFT model loaded.")
     return model, transforms, device
+
+
+class TemporalGuidance:
+    def __init__(self, model, transforms, device):
+        self.model = model
+        self.transforms = transforms
+        self.device = device
+
+    @classmethod
+    def load_raft(cls):
+        model, transforms, device = init_raft()
+        return cls(model, transforms, device)
+
+    def guide(self, current_frame, prev_frame=None, prev_dream=None, blend=0.5, occlusion_threshold=30):
+        height, width = current_frame.shape[:2]
+        empty_flow = np.zeros_like(current_frame)
+        full_mask = 255 * np.ones((height, width), dtype=np.uint8)
+
+        if prev_frame is None or prev_dream is None:
+            return current_frame.copy(), empty_flow, full_mask
+
+        if prev_dream.shape[:2] != current_frame.shape[:2]:
+            prev_dream = cv2.resize(prev_dream, (width, height))
+
+        flow_data, flow_vis = estimate_flow(
+            prev_frame, current_frame, self.model, self.transforms, self.device
+        )
+        warped_prev_dream = warp_image(prev_dream, flow_data)
+        warped_prev_frame = warp_image(prev_frame, flow_data)
+        mask, mask_vis = calculate_occlusion_mask(
+            current_frame, warped_prev_frame, threshold=occlusion_threshold
+        )
+
+        guided_dream = (mask * warped_prev_dream) + ((1 - mask) * current_frame)
+        guided_dream = guided_dream.astype(np.uint8)
+        guided_frame = cv2.addWeighted(current_frame, blend, guided_dream, 1 - blend, 0)
+
+        return guided_frame, flow_vis, mask_vis
 
 def flow_to_image(flow_array):
     h, w = flow_array.shape[:2]
