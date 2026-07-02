@@ -121,7 +121,7 @@ def build_net(cnn, dream_layers, has_inception, layerList, use_classify, start_p
                     next_dream_idx += 1
 
     elif has_inception:
-        start_net, tv_losses, l2_losses = start_network(start_params)
+        start_net, tv_losses, l2_losses = start_network(*start_params)
         lm_layer_names, loss_module_list = [], []
         net_base = copy.deepcopy(cnn)
         sn=0
@@ -173,17 +173,6 @@ def renew_net(start_params, net, loss_module_list, dream_layers):
     start_net, tv_losses, l2_losses = start_network(*start_params)
     if isinstance(net, dream_utils.ModelPlus):
        net = net.net
-    new_dream_losses = []
-    sn=0
-    for i, layer in enumerate(dream_layers):
-        n = layer
-        loss_module = loss_module_list[i]
-        if str(loss_module).split('(')[0] == 'DreamLossPreHook':
-            module_loc = 'before'
-        else:
-            module_loc = 'after'
-        loss_module, sn = add_to_incept(net, n, sn, loss_module, module_loc)
-        new_dream_losses.append(loss_module_list[i])
     if len(start_net) > 0:
         net = dream_utils.ModelPlus(start_net, net)
-    return net, new_dream_losses, tv_losses, l2_losses
+    return net, loss_module_list, tv_losses, l2_losses

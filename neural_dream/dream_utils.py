@@ -38,7 +38,7 @@ class GaussianBlur(nn.Module):
         kernel = 1
 
         meshgrid_tensor = torch.meshgrid([torch.arange(size, dtype=torch.float32, \
-        device=input.get_device()) for size in self.k_size])
+        device=input.device) for size in self.k_size])
 
         for size, std, mgrid in zip(self.k_size, self.sigma, meshgrid_tensor):
             kernel *= 1 / (std * math.sqrt(2 * math.pi)) * \

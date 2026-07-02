@@ -130,6 +130,7 @@ def process_video(args, dreamer_args):
         raise FileNotFoundError(f"Input video not found at: {args.content_video}")
 
     workspace = create_workspace(args.temp_dir)
+    dreamer = None
 
     try:
         temporal_guidance = None
@@ -137,6 +138,9 @@ def process_video(args, dreamer_args):
             print("Mode: Independent (Temporal consistency disabled)")
         else:
             temporal_guidance = load_temporal_guidance(args.verbose)
+
+        with suppress_output(args.verbose):
+            dreamer = DeepDreamer(clean_dreamer_args)
 
         output_width = None
         output_height = None
@@ -163,9 +167,6 @@ def process_video(args, dreamer_args):
 
                 print(f"Processing frame {frame_count}/{total_frames}")
 
-                with suppress_output(args.verbose):
-                    dreamer = DeepDreamer(clean_dreamer_args)
-
                 paths = frame_paths(workspace, frame_count)
                 img_to_dream = frame.copy()
 
@@ -182,9 +183,6 @@ def process_video(args, dreamer_args):
 
                 with suppress_output(args.verbose):
                     dreamer.dream(paths["dream_input"], paths["dream_output"])
-
-                del dreamer
-                clear_accelerator_cache()
 
                 if os.path.exists(paths["dream_output"]):
                     prev_dream = cv2.imread(paths["dream_output"])
@@ -224,6 +222,8 @@ def process_video(args, dreamer_args):
             )
 
     finally:
+        dreamer = None
+        clear_accelerator_cache()
         if not args.keep_temp:
             cleanup_workspace(workspace)
 
